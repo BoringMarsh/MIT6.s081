@@ -132,21 +132,3 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
-
-void
-backtrace(void)
-{
-  printf("backtrace:\n");
-
-  //frame pointer
-  //points to a page which stores a stack
-  uint64 fp = r_fp();
-
-  //print while the stack page is valid
-  while (PGROUNDDOWN(fp) < PGROUNDUP(fp)) {
-    //fp gives an address, but we need the data
-    //convert to pointer first, get the data second
-    printf("%p\n", *((uint64 *)(fp - 8)));
-    fp = *((uint64 *)(fp - 16));
-  }
-}

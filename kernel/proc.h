@@ -103,9 +103,4 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-
-  int a_ticks;
-  int a_interval;
-  uint64 a_handler;
-  struct trapframe a_trapframe;
 };

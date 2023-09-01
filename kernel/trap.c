@@ -65,6 +65,32 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }
+  else if (!p->killed && (r_scause() == 13 || r_scause() == 15)) {
+    //load/store page fail
+
+    uint64 fault_va = r_stval();  //get virtual address where page fault happened
+
+    if (PGROUNDDOWN(p->trapframe->sp) >= fault_va || fault_va >= p->sz) {  //invalid va
+      p->killed = 1;
+    }
+    else {
+      char *pa = kalloc();  //alloc a new page
+
+      if (pa) {
+        memset(pa, 0, PGSIZE);
+
+        if (mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE, (uint64)pa, PTE_R | PTE_W | PTE_U) != 0) {  //mapping fail
+          printf("mapping failed after page fail\n");
+          kfree(pa);
+          p->killed = 1;
+        }
+      }
+      else {  //kalloc fail
+        printf("kalloc failed after page fail\n");
+        p->killed = 1;
+      }
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -77,20 +103,8 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2) {
-    if (p->a_interval) {  //handle when interval is valid
-      p->a_ticks++;  //tick
-
-      if (p->a_ticks == p->a_interval) {
-        //save the trapframe
-        memmove(&(p->a_trapframe), p->trapframe, sizeof(*(p->trapframe)));
-        //switch the pc to handler
-        p->trapframe->epc = p->a_handler;
-      }
-    }
-    
+  if(which_dev == 2)
     yield();
-  }
 
   usertrapret();
 }
