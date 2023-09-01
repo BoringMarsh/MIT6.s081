@@ -275,6 +275,9 @@ fork(void)
   }
   np->sz = p->sz;
 
+  //copy the trace_mask field
+  np->trace_mask = p->trace_mask;
+
   np->parent = p;
 
   // copy saved user registers.
@@ -692,4 +695,24 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+//Returns numbers of being used procs
+uint64
+proc_count(void)
+{
+  struct proc *p;
+  uint64 count = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++)
+  {
+    acquire(&(p->lock));
+
+    if (p->state != UNUSED)
+      count++;
+
+    release(&(p->lock));
+  }
+
+  return count;
 }
