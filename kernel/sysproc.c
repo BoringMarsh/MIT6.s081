@@ -46,22 +46,9 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-
-  struct proc *p = myproc();
-  if (n < 0 && p->sz < (-n))  //negative n is too big
+  addr = myproc()->sz;
+  if(growproc(n) < 0)
     return -1;
-
-  addr = p->sz;
-  // if(growproc(n) < 0)
-  //   return -1;  
-  //simply increment the process's size
-  //no need to handle overflow
-  //because overflow handling is in trap.c
-  p->sz += n;
-
-  if (n < 0) {  //if negative, call uvmdealloc to update pagetable
-    uvmdealloc(p->pagetable, addr, p->sz);
-  }
   return addr;
 }
 

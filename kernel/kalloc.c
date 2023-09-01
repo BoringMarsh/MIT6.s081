@@ -21,13 +21,57 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  struct spinlock ref_lock;
+  unsigned int *ref_count;
 } kmem;
+
+#define PA2REFINDEX(pa) (((char *)pa - (char *)PGROUNDUP((uint64)end)) >> 12)
+
+unsigned int
+get_ref_count(void *pa)
+{
+  return kmem.ref_count[PA2REFINDEX(pa)];
+}
+
+void
+add_ref_count(void *pa)
+{
+  kmem.ref_count[PA2REFINDEX(pa)]++;
+}
+
+void
+acquire_ref_lock()
+{
+  acquire(&kmem.ref_lock);
+}
+
+void
+release_ref_lock()
+{
+  release(&kmem.ref_lock);
+}
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  initlock(&kmem.ref_lock, "ref_lock");
+  //freerange(end, (void*)PHYSTOP);
+  //printf("end: %p\n", (uint64)end);
+
+  const uint64 USRSIZE = PHYSTOP - (uint64)end;
+  const uint64 PHYPGCOUNT = (USRSIZE >> 12) + (USRSIZE % 0x1000 != 0);  //pages count
+  const uint64 RCSIZE = PHYPGCOUNT * sizeof(uint);  //max size of ref_count array
+  const uint64 RCPGCOUNT = (RCSIZE >> 12) + (RCSIZE % 0x1000 != 0);  //number of pages for storing ref_count array
+  const uint64 RCPGSIZE = RCPGCOUNT << 12;  //size of pages storing ref_count array
+  kmem.ref_count = (unsigned int*)end;  //set first address of ref_count array
+  //printf("USRSIZE:    %p\n", USRSIZE);
+  //printf("PHYPGCOUNT: %p\n", PHYPGCOUNT);
+  //printf("RCSIZE:     %p\n", RCSIZE);
+  //printf("RCPGCOUNT:  %p\n", RCPGCOUNT);
+  //printf("RCPGSIZE:   %p\n", RCPGSIZE);
+  
+  freerange(end + RCPGSIZE, (void*)PHYSTOP);  //all physical pages except those for storing ref_count array is free
 }
 
 void
@@ -35,8 +79,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    kmem.ref_count[PA2REFINDEX(p)] = 1;  //set 1 default is for kfree
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -50,6 +96,13 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&kmem.lock);
+  if (--kmem.ref_count[PA2REFINDEX(pa)]) {
+    release(&kmem.lock);
+    return;
+  }
+  release(&kmem.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -72,8 +125,10 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    kmem.ref_count[PA2REFINDEX(r)] = 1;
+  }
   release(&kmem.lock);
 
   if(r)

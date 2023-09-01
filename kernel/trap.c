@@ -65,32 +65,48 @@ usertrap(void)
     intr_on();
 
     syscall();
-  }
-  else if (!p->killed && (r_scause() == 13 || r_scause() == 15)) {
-    //load/store page fail
+  } else if (r_scause() == 15) {
+    uint64 va = PGROUNDDOWN(r_stval());
+    pte_t *pte = walk(p->pagetable, va, 0);
 
-    uint64 fault_va = r_stval();  //get virtual address where page fault happened
-
-    if (PGROUNDDOWN(p->trapframe->sp) >= fault_va || fault_va >= p->sz) {  //invalid va
+    if (va > p->sz || pte == 0) {  //invalid va
       p->killed = 1;
+      goto end;
     }
-    else {
-      char *pa = kalloc();  //alloc a new page
+    
+    if (((*pte) & PTE_RSW) == 0 || ((*pte) & PTE_U) == 0 || ((*pte) & PTE_V) == 0) {  //invalid page
+      p->killed = 1;
+      goto end;
+    }
 
-      if (pa) {
-        memset(pa, 0, PGSIZE);
+    uint64 pa = PTE2PA(*pte);
+    acquire_ref_lock();
 
-        if (mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE, (uint64)pa, PTE_R | PTE_W | PTE_U) != 0) {  //mapping fail
-          printf("mapping failed after page fail\n");
-          kfree(pa);
-          p->killed = 1;
-        }
-      }
-      else {  //kalloc fail
-        printf("kalloc failed after page fail\n");
+    if (get_ref_count((void *)pa) == 1)  //only parent process ref the page
+      *pte = ((*pte) & (~PTE_RSW)) | PTE_W;
+    else {  //parent and some children ref the page
+      char *np = kalloc();  //alloc new page
+
+      if (np == 0) {  //kalloc fail
         p->killed = 1;
+        release_ref_lock();
+        goto end;
       }
+
+      memmove(np, (char *)pa, PGSIZE);  //copy old page to new page
+      uint flags = (PTE_FLAGS(*pte) | PTE_W) & (~PTE_RSW);  //get old flags, add W, remove RSW
+
+      if (mappages(p->pagetable, va, PGSIZE, (uint64)np, flags) != 0) {  //map new page
+        kfree(np);
+        p->killed = 1;
+        release_ref_lock();
+        goto end;
+      }
+
+      kfree((char *)pa);  //free old page
     }
+
+    release_ref_lock();
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -98,6 +114,8 @@ usertrap(void)
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
+
+end:
 
   if(p->killed)
     exit(-1);
