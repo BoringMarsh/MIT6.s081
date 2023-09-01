@@ -1,0 +1,18 @@
+设线程1要put的key值为71，线程2要put的key值为91
+若桶1内这两个值都没有，则两个线程都要把自己的key值写入桶1
+若没有锁的控制，在将值加入链表的时候会发生错误
+以下过程设指向桶1链表头结点的指针叫head1
+
+alloc e1
+alloc e2
+e1->key = 71
+e2->key = 91
+e1->value = thread1
+e2->value = thread2
+e1->next = head1
+e2->next = head1
+pointer to head1 = e1
+pointer to head1 = e2
+
+若两线程以上述过程并行执行，会导致pointer to head1 -> e2 -> head1 <- e1
+出现分叉，并且pointer to head1由于被覆盖而指向了e2，e1的值丢失

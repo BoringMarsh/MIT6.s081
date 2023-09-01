@@ -30,9 +30,6 @@ kvminit()
   // virtio mmio disk interface
   kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
-  // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
-
   // PLIC
   kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
 
@@ -68,7 +65,7 @@ kvminithart()
 //   21..29 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
-pte_t *
+static pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
   if(va >= MAXVA)
@@ -121,26 +118,6 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
-// translate a kernel virtual address to
-// a physical address. only needed for
-// addresses on the stack.
-// assumes va is page aligned.
-uint64
-kvmpa(uint64 va)
-{
-  uint64 off = va % PGSIZE;
-  pte_t *pte;
-  uint64 pa;
-  
-  pte = walk(kernel_pagetable, va, 0);
-  if(pte == 0)
-    panic("kvmpa");
-  if((*pte & PTE_V) == 0)
-    panic("kvmpa");
-  pa = PTE2PA(*pte);
-  return pa+off;
-}
-
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned. Returns 0 on success, -1 if walk() couldn't
@@ -156,8 +133,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    // if(*pte & PTE_V)
-    //   panic("remap");
+    if(*pte & PTE_V)
+      panic("remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -311,24 +288,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
+  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
-    *pte = ((*pte) & ~(PTE_W)) | PTE_RSW;  //clear PTE_W and set PTE_ASW
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    // if((mem = kalloc()) == 0)
-    //   goto err;
-    // memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, pa, flags) != 0){
-      //kfree(mem);
+    if((mem = kalloc()) == 0)
+      goto err;
+    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
       goto err;
     }
-
-    add_ref_count((char *)pa);  //corresponding count +1
   }
   return 0;
 
@@ -360,43 +335,6 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pte_t *pte;
-
-    if (va0 >= MAXVA
-    || (pte = walk(pagetable, va0, 0)) == 0
-    || ((*pte) & PTE_V) == 0
-    || ((*pte) & PTE_U) == 0
-    )  //all kinds of invalid
-      return -1;
-
-    pa0 = PTE2PA(*pte);
-    if (((*pte) & PTE_W) == 0 && ((*pte) & PTE_RSW)) {
-      acquire_ref_lock();
-      if (get_ref_count((void *)pa0) == 1)  //only parent process ref the page
-        *pte = ((*pte) | PTE_W) & (~PTE_RSW);
-      else {  //parent and some children ref the page
-        char *np = kalloc();  //alloc new page
-
-        if (np == 0) {  //kalloc fail
-          release_ref_lock();
-          return -1;
-        }
-
-        memmove(np, (char *)pa0, PGSIZE);  //copy old page to new page
-        uint flags = (PTE_FLAGS(*pte) | PTE_W) & (~PTE_RSW);  //get old flags, add W, remove RSW
-
-        if (mappages(pagetable, va0, PGSIZE, (uint64)np, flags) != 0) {  //map new page
-          kfree(np);
-          release_ref_lock();
-          return -1;
-        }
-
-        kfree((char *)pa0);  //free old page
-      }
-
-      release_ref_lock();
-    }
-
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
