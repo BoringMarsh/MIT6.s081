@@ -82,18 +82,6 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
-#define VMASIZE 16
-
-struct vma {
-  struct file *file;
-  uint64 addr;
-  int fd;
-  int used;
-  int prot;
-  int flags;
-  uint length;
-};
-
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -115,5 +103,4 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  struct vma vma[VMASIZE];     // Info of virtual memory areas created by mmap
 };
