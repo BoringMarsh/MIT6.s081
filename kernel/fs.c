@@ -387,7 +387,7 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
+  if(bn < NINDIRECT1){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
@@ -395,6 +395,32 @@ bmap(struct inode *ip, uint bn)
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT1;
+
+  if (bn < NINDIRECT2) {
+    //load first-level indirect block, allocating if necessary
+    if((addr = ip->addrs[NDIRECT + 1]) == 0)
+      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
+
+    //load second-level indirect block, allocating if necessary
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if ((addr = a[bn / NINDIRECT1]) == 0) {
+      a[bn / NINDIRECT1] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+
+    //load data block, allocating if necessary
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if ((addr = a[bn % NINDIRECT1]) == 0) {
+      a[bn % NINDIRECT1] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
@@ -410,26 +436,47 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp1, *bp2;
+  uint *a1, *a2;
 
-  for(i = 0; i < NDIRECT; i++){
+  for(i = 0; i < NDIRECT; i++){  //free direct blocks
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
 
-  if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
+  if(ip->addrs[NDIRECT]){  //free first-level blocks
+    bp1 = bread(ip->dev, ip->addrs[NDIRECT]);
+    a1 = (uint*)bp1->data;
+    for(j = 0; j < NINDIRECT1; j++){
+      if(a1[j])
+        bfree(ip->dev, a1[j]);
     }
-    brelse(bp);
+    brelse(bp1);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT + 1]) {  //free second-level blocks
+    bp1 = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a1 = (uint*)bp1->data;
+    for(i = 0; i < NINDIRECT1; i++) {
+      if (a1[i]) {
+        bp2 = bread(ip->dev, a1[i]);
+        a2 = (uint*)bp2->data;
+        for (j = 0; j < NINDIRECT1; j++) {
+          if (a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a1[i]);
+        a1[i] = 0;
+      }
+    }
+    brelse(bp1);
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
@@ -480,6 +527,9 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 // Caller must hold ip->lock.
 // If user_src==1, then src is a user virtual address;
 // otherwise, src is a kernel address.
+// Returns the number of bytes successfully written.
+// If the return value is less than the requested n,
+// there was an error of some kind.
 int
 writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 {
@@ -496,23 +546,21 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
       brelse(bp);
-      n = -1;
       break;
     }
     log_write(bp);
     brelse(bp);
   }
 
-  if(n > 0){
-    if(off > ip->size)
-      ip->size = off;
-    // write the i-node back to disk even if the size didn't change
-    // because the loop above might have called bmap() and added a new
-    // block to ip->addrs[].
-    iupdate(ip);
-  }
+  if(off > ip->size)
+    ip->size = off;
 
-  return n;
+  // write the i-node back to disk even if the size didn't change
+  // because the loop above might have called bmap() and added a new
+  // block to ip->addrs[].
+  iupdate(ip);
+
+  return tot;
 }
 
 // Directories

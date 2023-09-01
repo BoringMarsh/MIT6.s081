@@ -284,6 +284,35 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  //fetch target and path arguments
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  //create inode
+  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+
+  //write target to inode's data
+  if (writei(ip, 0, (uint64)target, 0, MAXPATH) < MAXPATH) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+uint64
 sys_open(void)
 {
   char path[MAXPATH];
@@ -304,11 +333,39 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+    const int max_depth = 15;
+    int depth = 0;
+
+    while (1) {
+      if ((ip = namei(path)) == 0) {  //get the inode according to current path
+        end_op();
+        return -1;
+      }
+
+      ilock(ip);
+
+      if (ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {  //the inode is a symbolic link and we should follow it
+
+        depth++;  //into next depth
+
+        if (depth > max_depth) {  //recursive too deep
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        if (readi(ip, 0, (uint64)path, 0, MAXPATH) < MAXPATH) {  //read target from inode's data to recursive
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        iunlockput(ip);
+      }
+      else
+        break;
     }
-    ilock(ip);
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
