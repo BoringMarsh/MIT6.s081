@@ -34,12 +34,12 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -113,6 +113,15 @@ found:
     return 0;
   }
 
+  //create kernel page table and allocate kstack
+  p->k_pagetable = kvmcreate();
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int)(p - proc));
+  mappages(p->k_pagetable, va, PGSIZE, (uint64)pa, PTE_R | PTE_W);
+  p->kstack = va;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -130,15 +139,42 @@ found:
   return p;
 }
 
+// free pg recursively
+void proc_free_k_pagetable(pagetable_t pg){
+  for (int i = 0; i < 512; i++){
+    pte_t pte = pg[i];
+
+    // copy wrong!!
+    // if((pte & PTE_V) && (PTE_R|PTE_W|PTE_X) == 0){
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uint64 child = PTE2PA(pte);
+      proc_free_k_pagetable((pagetable_t)child);
+      pg[i] = 0;
+    } 
+  }
+  kfree((void*)pg);
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
 static void
 freeproc(struct proc *p)
 {
+  if (p->kstack){
+    pte_t* pte = walk(p->k_pagetable, p->kstack, 0);
+    if (pte == 0)
+      panic("freeproc: kstack");
+    kfree((void*)PTE2PA(*pte));
+  }
+  p->kstack = 0;
+
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if (p->k_pagetable)
+    proc_free_k_pagetable(p->k_pagetable);
+  p->k_pagetable = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -221,6 +257,9 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  //shift page table
+  uvm2kvm(p->pagetable, p->k_pagetable, 0, p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -249,6 +288,9 @@ growproc(int n)
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
+
+  //shift page table
+  uvm2kvm(p->pagetable, p->k_pagetable, sz - n, sz);
   p->sz = sz;
   return 0;
 }
@@ -275,8 +317,8 @@ fork(void)
   }
   np->sz = p->sz;
 
-  //copy the trace_mask field
-  np->trace_mask = p->trace_mask;
+  //shift page table(child)
+  uvm2kvm(np->pagetable, np->k_pagetable, 0, np->sz);
 
   np->parent = p;
 
@@ -476,8 +518,10 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
         swtch(&c->context, &p->context);
-
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
@@ -486,10 +530,14 @@ scheduler(void)
       }
       release(&p->lock);
     }
+#if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
       asm volatile("wfi");
     }
+#else
+    ;
+#endif
   }
 }
 
@@ -695,24 +743,4 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
-}
-
-//Returns numbers of being used procs
-uint64
-proc_count(void)
-{
-  struct proc *p;
-  uint64 count = 0;
-
-  for (p = proc; p < &proc[NPROC]; p++)
-  {
-    acquire(&(p->lock));
-
-    if (p->state != UNUSED)
-      count++;
-
-    release(&(p->lock));
-  }
-
-  return count;
 }
