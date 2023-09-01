@@ -284,35 +284,6 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
-sys_symlink(void)
-{
-  char target[MAXPATH], path[MAXPATH];
-  struct inode *ip;
-
-  //fetch target and path arguments
-  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
-    return -1;
-
-  begin_op();
-  //create inode
-  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
-    end_op();
-    return -1;
-  }
-
-  //write target to inode's data
-  if (writei(ip, 0, (uint64)target, 0, MAXPATH) < MAXPATH) {
-    iunlockput(ip);
-    end_op();
-    return -1;
-  }
-
-  iunlockput(ip);
-  end_op();
-  return 0;
-}
-
-uint64
 sys_open(void)
 {
   char path[MAXPATH];
@@ -333,39 +304,11 @@ sys_open(void)
       return -1;
     }
   } else {
-    const int max_depth = 15;
-    int depth = 0;
-
-    while (1) {
-      if ((ip = namei(path)) == 0) {  //get the inode according to current path
-        end_op();
-        return -1;
-      }
-
-      ilock(ip);
-
-      if (ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {  //the inode is a symbolic link and we should follow it
-
-        depth++;  //into next depth
-
-        if (depth > max_depth) {  //recursive too deep
-          iunlockput(ip);
-          end_op();
-          return -1;
-        }
-
-        if (readi(ip, 0, (uint64)path, 0, MAXPATH) < MAXPATH) {  //read target from inode's data to recursive
-          iunlockput(ip);
-          end_op();
-          return -1;
-        }
-
-        iunlockput(ip);
-      }
-      else
-        break;
+    if((ip = namei(path)) == 0){
+      end_op();
+      return -1;
     }
-    
+    ilock(ip);
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -538,6 +481,88 @@ sys_pipe(void)
     fileclose(rf);
     fileclose(wf);
     return -1;
+  }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  uint length, offset;
+  int prot, flags, fd;
+  struct proc *p = myproc();
+  struct file *file;
+
+  if (argaddr(0, &addr) < 0
+  || argint(1, (int *)&length) < 0
+  || argint(2, &prot) < 0
+  || argint(3, &flags) < 0
+  || argfd(4, &fd, &file) < 0
+  || argint(5, (int *)&offset) < 0)
+    return -1;
+
+  if (!file->writable && (prot & PROT_WRITE) && flags == MAP_SHARED)
+    return -1;
+
+  length = PGROUNDUP(length);
+  if (p->sz + length > MAXVA)
+    return -1;
+
+  for (int i = 0; i < VMASIZE; i++) {
+    if (p->vma[i].used == 0) {
+      p->vma[i].addr = p->sz;
+      p->vma[i].fd = fd;
+      p->vma[i].file = file;
+      p->vma[i].flags = flags;
+      p->vma[i].length = length;
+      p->vma[i].prot = prot;
+      p->vma[i].used = 1;
+      filedup(file);
+      p->sz += length;
+      return p->vma[i].addr;
+    }
+  }
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  uint length;
+  struct proc *p = myproc();
+  struct vma *vmap = 0;
+
+  if (argaddr(0, &addr) < 0 || argint(1, (int *)&length) < 0)
+    return -1;
+
+  addr = PGROUNDDOWN(addr);
+  length = PGROUNDUP(length);
+
+  for (int i = 0; i < VMASIZE; i++) {
+    if (addr >= p->vma[i].addr && addr < p->vma[i].addr + p->vma[i].length) {
+      vmap = &p->vma[i];
+      break;
+    }
+  }
+
+  if (vmap == 0)
+    return -1;
+
+  if (vmap->addr == addr) {
+    vmap->addr += length;
+    vmap->length -= length;
+
+    if (vmap->flags & MAP_SHARED)
+      filewrite(vmap->file, addr, length);
+
+    uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+
+    if (vmap->length == 0) {
+      fileclose(vmap->file);
+      vmap->used = 0;
+    }
   }
   return 0;
 }
